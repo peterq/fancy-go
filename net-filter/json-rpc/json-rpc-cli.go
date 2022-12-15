@@ -77,6 +77,22 @@ func (c *Cli) init() {
 	}
 }
 
+func (c *Cli) Emit(topic string, payload interface{}) error {
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return errors.Wrap(err, "marshal payload error")
+	}
+	msg := Message{
+		Method: topic,
+		Params: jsonPayload,
+	}
+	err = c.messageChannel.WriteCtx(c.ctx, &msg)
+	if err != nil {
+		return errors.Wrap(err, "write message error")
+	}
+	return nil
+}
+
 func (c *Cli) Call(ctx context.Context, method string, params interface{}, result interface{}) error {
 	jsonParams, err := json.Marshal(params)
 	if err != nil {

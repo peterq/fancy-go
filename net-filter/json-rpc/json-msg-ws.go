@@ -7,6 +7,11 @@ import (
 	"github.com/peterq/fancy-go/net-filter/websocket-util"
 	"github.com/pkg/errors"
 	"golang.org/x/net/websocket"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -148,4 +153,93 @@ func WebSocketConn2MessageChannel(conn *websocket.Conn) (JsonMessageChannel, Jso
 			},
 			close: closeFn,
 		}
+}
+
+type WsHttpHandler struct {
+	OriginWhitelist []string
+	Protocols       []string
+	Handshake       func(config *websocket.Config, request *http.Request) (err error)
+	OnChannel       func(ctx context.Context, serverChannel JsonMessageChannel, clientChannel JsonMessageChannel) ServerSession
+
+	wsServer websocket.Server
+}
+
+func (h *WsHttpHandler) Init() {
+	h.wsServer = websocket.Server{
+		Handshake: func(config *websocket.Config, request *http.Request) (err error) {
+			defer func() {
+				if err != nil {
+					log.Println("websocket handshake error:", err)
+				}
+			}()
+
+			// check origin
+			if len(h.OriginWhitelist) > 0 {
+				org := request.Header.Get("Origin")
+				if org == "" {
+					return errors.New("origin is empty")
+				}
+				origin, err := url.Parse(org)
+				if err != nil {
+					return errors.Wrap(err, "parse origin error")
+				}
+				var originHost string
+				hostname, _, err := net.SplitHostPort(origin.Host)
+				if err != nil {
+					hostname = origin.Host
+				}
+				for _, v := range h.OriginWhitelist {
+					if strings.HasSuffix(hostname, v) {
+						originHost = v
+						break
+					}
+				}
+				if originHost == "" {
+					return errors.New("origin not in white list: " + hostname)
+				}
+			}
+
+			if len(h.Protocols) > 0 {
+				protocol := ""
+				for _, v := range config.Protocol {
+					for _, p := range h.Protocols {
+						if v == p {
+							protocol = v
+							break
+						}
+					}
+					if protocol != "" {
+						break
+					}
+				}
+				if protocol == "" {
+					return errors.New("protocol not found")
+				}
+				config.Protocol = []string{protocol}
+			}
+			if f := h.Handshake; f != nil {
+				return f(config, request)
+			}
+			return nil
+		},
+		Handler: h.handleWs,
+	}
+}
+
+func (h *WsHttpHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	h.wsServer.ServeHTTP(writer, request)
+}
+
+type ServerSession interface {
+	Serve(ctx context.Context) (err error)
+}
+
+func (h *WsHttpHandler) handleWs(ws *websocket.Conn) {
+	defer ws.Close()
+	ctx, cancel := context.WithCancel(ws.Request().Context())
+	defer cancel()
+	serverChannel, clientChannel := WebSocketConn2MessageChannel(ws)
+	ss := h.OnChannel(ctx, serverChannel, clientChannel)
+	err := ss.Serve(ws.Request().Context())
+	log.Println("cdp host session end:", err)
 }
