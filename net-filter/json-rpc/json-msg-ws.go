@@ -234,12 +234,23 @@ type ServerSession interface {
 	Serve(ctx context.Context) (err error)
 }
 
+const ctxKeyWsConn = "wsConn"
+
+func WsConnFromCtx(ctx context.Context) *websocket.Conn {
+	return ctx.Value(ctxKeyWsConn).(*websocket.Conn)
+}
+
 func (h *WsHttpHandler) handleWs(ws *websocket.Conn) {
 	defer ws.Close()
 	ctx, cancel := context.WithCancel(ws.Request().Context())
 	defer cancel()
 	serverChannel, clientChannel := WebSocketConn2MessageChannel(ws)
+	ctx = context.WithValue(ctx, ctxKeyWsConn, serverChannel)
 	ss := h.OnChannel(ctx, serverChannel, clientChannel)
+	if ss == nil {
+		log.Println("OnChannel return nil")
+		return
+	}
 	err := ss.Serve(ws.Request().Context())
 	log.Println("cdp host session end:", err)
 }
