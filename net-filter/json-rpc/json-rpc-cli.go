@@ -3,6 +3,7 @@ package json_rpc
 import (
 	"context"
 	"encoding/json"
+	"github.com/peterq/fancy-go/error-code"
 	"github.com/pkg/errors"
 	"log"
 	"sync"
@@ -23,6 +24,8 @@ type pendingCall struct {
 	ch chan error
 	r  interface{}
 }
+
+var NoopHandleEvent func(evtType string, evtPayload json.RawMessage) error
 
 func NewCli(ctx context.Context, messageChannel JsonMessageChannel, handleEvent func(evtType string, evtPayload json.RawMessage) error) *Cli {
 	ctx, cancel := context.WithCancel(ctx)
@@ -70,7 +73,11 @@ func (c *Cli) init() {
 					log.Println("result ignored", msg.ID)
 					continue
 				}
-				err = errors.Wrap(json.Unmarshal(msg.Result, call.r), "unmarshal result error")
+				if msg.Error != nil {
+					err = error_code.NewError(msg.Error.Code, msg.Error.Message)
+				} else {
+					err = errors.Wrap(json.Unmarshal(msg.Result, call.r), "unmarshal result error")
+				}
 				call.ch <- err
 			}
 		}
@@ -94,6 +101,9 @@ func (c *Cli) Emit(topic string, payload interface{}) error {
 }
 
 func (c *Cli) Call(ctx context.Context, method string, params interface{}, result interface{}) error {
+	if ctx == nil || ctx == context.TODO() {
+		ctx = c.ctx
+	}
 	jsonParams, err := json.Marshal(params)
 	if err != nil {
 		return errors.Wrap(err, "marshal params error")

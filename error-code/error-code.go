@@ -85,7 +85,7 @@ func (n *withCode) Code() int {
 	return n.code
 }
 
-func NewError(message string, code int) CodedError {
+func NewError(code int, message string) CodedError {
 	return &withCode{
 		code:  code,
 		error: &withStack{caller: getCaller(), error: errors.New(message)},
@@ -112,7 +112,7 @@ func define(code int, message string) CodedError {
 		panic(errors.New(fmt.Sprintf("duplicate error code %d; %s", code, message)))
 	}
 	codeMap[code] = message
-	return NewError(message, code)
+	return NewError(code, message)
 }
 
 func Define(code int, message string) CodedError {

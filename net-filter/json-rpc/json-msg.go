@@ -17,6 +17,7 @@ type JsonMessageChannel interface {
 	ReadCtx(ctx context.Context, msg *Message) error
 	WriteCtx(ctx context.Context, msg *Message) error
 	Close() error
+	Closed() bool
 }
 
 type lengthPrefixedChannel struct {
@@ -63,6 +64,7 @@ func (l *lengthPrefixedChannel) ReadCtx(ctx context.Context, msg *Message) error
 	if !l.scanner.Scan() {
 		return l.scanner.Err()
 	}
+	*msg = Message{}
 	err := json.Unmarshal(l.scanner.Bytes(), msg)
 	if err != nil {
 		return errors.Wrap(err, "invalid json message")

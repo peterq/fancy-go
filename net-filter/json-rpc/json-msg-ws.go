@@ -3,10 +3,6 @@ package json_rpc
 import (
 	"context"
 	"encoding/json"
-	"github.com/peterq/fancy-go/cond-chan"
-	"github.com/peterq/fancy-go/net-filter/websocket-util"
-	"github.com/pkg/errors"
-	"golang.org/x/net/websocket"
 	"log"
 	"net"
 	"net/http"
@@ -14,9 +10,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/peterq/fancy-go/cond-chan"
+	"github.com/peterq/fancy-go/mutex-task"
+	"github.com/peterq/fancy-go/net-filter/websocket-util"
+	"github.com/pkg/errors"
+	"golang.org/x/net/websocket"
 )
 
+var _ JsonMessageChannel = (*wsChannel)(nil)
+
 type wsChannel struct {
+	ctx      context.Context
 	writeBin func(bin []byte) error
 	readMsg  func(ctx context.Context, msg *Message) error
 	close    func() error
@@ -38,19 +43,27 @@ func (w *wsChannel) Close() error {
 	return w.close()
 }
 
+func (w *wsChannel) Closed() bool {
+	return w.ctx.Err() != nil
+}
+
 func WebSocketConn2MessageChannel(conn *websocket.Conn) (JsonMessageChannel, JsonMessageChannel) {
 	writeMutex := sync.Mutex{}
 	ctx, cancel := context.WithCancel(context.Background())
+	closeFn := func() error {
+		cancel()
+		return conn.Close()
+	}
 	writeBin := func(bin []byte) error {
 		writeMutex.Lock()
 		defer writeMutex.Unlock()
 		conn.PayloadType = websocket.TextFrame
 		_, err := conn.Write(bin)
+		if err != nil {
+			closeFn()
+			return err
+		}
 		return err
-	}
-	closeFn := func() error {
-		cancel()
-		return conn.Close()
 	}
 
 	type messageRole int
@@ -68,8 +81,10 @@ func WebSocketConn2MessageChannel(conn *websocket.Conn) (JsonMessageChannel, Jso
 		}
 		_, bin, err := websocket_util.ReceiveFullFrame(conn, readCtx)
 		if err != nil {
+			closeFn()
 			return errors.Wrap(err, "read json message")
 		}
+		lastMessage = Message{}
 		err = json.Unmarshal(bin, &lastMessage)
 		if err != nil {
 			return errors.Wrap(err, "unmarshal json message")
@@ -131,6 +146,7 @@ func WebSocketConn2MessageChannel(conn *websocket.Conn) (JsonMessageChannel, Jso
 	}
 
 	return &wsChannel{
+			ctx:      ctx,
 			writeBin: writeBin,
 			readMsg: func(ctx context.Context, msg *Message) error {
 				m, err := readFn(roleServer, ctx)
@@ -142,6 +158,7 @@ func WebSocketConn2MessageChannel(conn *websocket.Conn) (JsonMessageChannel, Jso
 			},
 			close: closeFn,
 		}, &wsChannel{
+			ctx:      ctx,
 			writeBin: writeBin,
 			readMsg: func(ctx context.Context, msg *Message) error {
 				m, err := readFn(roleClient, ctx)
@@ -162,71 +179,75 @@ type WsHttpHandler struct {
 	OnChannel       func(ctx context.Context, serverChannel JsonMessageChannel, clientChannel JsonMessageChannel) ServerSession
 
 	wsServer websocket.Server
+	initOnce sync.Once
 }
 
 func (h *WsHttpHandler) Init() {
-	h.wsServer = websocket.Server{
-		Handshake: func(config *websocket.Config, request *http.Request) (err error) {
-			defer func() {
-				if err != nil {
-					log.Println("websocket handshake error:", err)
-				}
-			}()
-
-			// check origin
-			if len(h.OriginWhitelist) > 0 {
-				org := request.Header.Get("Origin")
-				if org == "" {
-					return errors.New("origin is empty")
-				}
-				origin, err := url.Parse(org)
-				if err != nil {
-					return errors.Wrap(err, "parse origin error")
-				}
-				var originHost string
-				hostname, _, err := net.SplitHostPort(origin.Host)
-				if err != nil {
-					hostname = origin.Host
-				}
-				for _, v := range h.OriginWhitelist {
-					if strings.HasSuffix(hostname, v) {
-						originHost = v
-						break
+	h.initOnce.Do(func() {
+		h.wsServer = websocket.Server{
+			Handshake: func(config *websocket.Config, request *http.Request) (err error) {
+				defer func() {
+					if err != nil {
+						log.Println("websocket handshake error:", err)
 					}
-				}
-				if originHost == "" {
-					return errors.New("origin not in white list: " + hostname)
-				}
-			}
+				}()
 
-			if len(h.Protocols) > 0 {
-				protocol := ""
-				for _, v := range config.Protocol {
-					for _, p := range h.Protocols {
-						if v == p {
-							protocol = v
+				// check origin
+				if len(h.OriginWhitelist) > 0 {
+					org := request.Header.Get("Origin")
+					if org == "" {
+						return errors.New("origin is empty")
+					}
+					origin, err := url.Parse(org)
+					if err != nil {
+						return errors.Wrap(err, "parse origin error")
+					}
+					var originHost string
+					hostname, _, err := net.SplitHostPort(origin.Host)
+					if err != nil {
+						hostname = origin.Host
+					}
+					for _, v := range h.OriginWhitelist {
+						if strings.HasSuffix(hostname, v) {
+							originHost = v
 							break
 						}
 					}
-					if protocol != "" {
-						break
+					if originHost == "" {
+						return errors.New("origin not in white list: " + hostname)
 					}
 				}
-				if protocol == "" {
-					return errors.New("protocol not found")
+
+				if len(h.Protocols) > 0 {
+					protocol := ""
+					for _, v := range config.Protocol {
+						for _, p := range h.Protocols {
+							if v == p {
+								protocol = v
+								break
+							}
+						}
+						if protocol != "" {
+							break
+						}
+					}
+					if protocol == "" {
+						return errors.New("protocol not found")
+					}
+					config.Protocol = []string{protocol}
 				}
-				config.Protocol = []string{protocol}
-			}
-			if f := h.Handshake; f != nil {
-				return f(config, request)
-			}
-			return nil
-		},
-		Handler: h.handleWs,
-	}
+				if f := h.Handshake; f != nil {
+					return f(config, request)
+				}
+				return nil
+			},
+			Handler: h.handleWs,
+		}
+	})
 }
 
 func (h *WsHttpHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	h.Init()
 	h.wsServer.ServeHTTP(writer, request)
 }
 
@@ -245,12 +266,111 @@ func (h *WsHttpHandler) handleWs(ws *websocket.Conn) {
 	ctx, cancel := context.WithCancel(ws.Request().Context())
 	defer cancel()
 	serverChannel, clientChannel := WebSocketConn2MessageChannel(ws)
-	ctx = context.WithValue(ctx, ctxKeyWsConn, serverChannel)
+	ctx = context.WithValue(ctx, ctxKeyWsConn, ws)
 	ss := h.OnChannel(ctx, serverChannel, clientChannel)
 	if ss == nil {
 		log.Println("OnChannel return nil")
 		return
 	}
 	err := ss.Serve(ws.Request().Context())
-	log.Println("cdp host session end:", err)
+	log.Println("session end:", err)
+}
+
+var _ JsonMessageChannel = (*autoReconnectChannel)(nil)
+
+func NewAutoReconnectChannel(
+	createFn func(ctx context.Context) (JsonMessageChannel, error),
+) JsonMessageChannel {
+	return &autoReconnectChannel{
+		createFn:        createFn,
+		createInnerTask: mutex_task.NewMutexTask(createFn, func(context.Context) string { return "" }),
+	}
+}
+
+type autoReconnectChannel struct {
+	createFn        func(ctx context.Context) (JsonMessageChannel, error)
+	createInnerTask mutex_task.MutexTask[context.Context, JsonMessageChannel]
+	mu              sync.Mutex
+	closed          bool
+	inner           JsonMessageChannel
+}
+
+func (c *autoReconnectChannel) getInner(ctx context.Context) (JsonMessageChannel, error) {
+	c.mu.Lock()
+	closed, inner := c.closed, c.inner
+	if !closed && inner != nil && inner.Closed() {
+		c.inner = nil
+		inner = nil
+	}
+	c.mu.Unlock()
+	if closed {
+		return nil, errors.New("channel closed")
+	}
+	if inner != nil {
+		return inner, nil
+	}
+	inner, err := c.createInnerTask.Exec(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "create inner channel error")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		_ = inner.Close()
+		return nil, errors.New("channel closed")
+	}
+	c.inner = inner
+	return inner, nil
+}
+
+func (c *autoReconnectChannel) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	if c.inner != nil {
+		return c.inner.Close()
+	}
+	return nil
+}
+
+func (c *autoReconnectChannel) ReadCtx(ctx context.Context, msg *Message) error {
+	inner, err := c.getInner(ctx)
+	if err != nil {
+		return err
+	}
+	return inner.ReadCtx(ctx, msg)
+}
+
+func (c *autoReconnectChannel) WriteCtx(ctx context.Context, msg *Message) error {
+	inner, err := c.getInner(ctx)
+	if err != nil {
+		return err
+	}
+	return inner.WriteCtx(ctx, msg)
+}
+
+func (c *autoReconnectChannel) Closed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+func NewAutoReconnectChannelFromWebsocketAddr(
+	addr string,
+	handleServerChannel func(ctx context.Context, serverChannel JsonMessageChannel),
+) JsonMessageChannel {
+	return NewAutoReconnectChannel(func(ctx context.Context) (JsonMessageChannel, error) {
+		conn, err := websocket.Dial(addr, "", addr)
+		if err != nil {
+			return nil, errors.Wrap(err, "websocket dial error")
+		}
+		cli, server := WebSocketConn2MessageChannel(conn)
+		if handleServerChannel != nil {
+			go handleServerChannel(ctx, server)
+		}
+		return cli, nil
+	})
 }
