@@ -2,8 +2,9 @@ package mutex_task
 
 import (
 	"fmt"
-	"github.com/pkg/errors"
 	"sync"
+
+	"github.com/pkg/errors"
 )
 
 type MutexTask[P any, R any] interface {
@@ -33,7 +34,7 @@ type mutexTask[P any, R any] struct {
 	}
 }
 
-func (m mutexTask[P, R]) Exec(p P) (R, error) {
+func (m *mutexTask[P, R]) Exec(p P) (R, error) {
 	key := m.keyGetter(p)
 	m.mu.Lock()
 	if _, ok := m.waitingMap[key]; !ok { // not running

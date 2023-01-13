@@ -13,6 +13,7 @@ type CodedError interface {
 	CodeEqual(err error) bool
 	WrapWith(err error, s string) CodedError
 	WithExtra(key string, value interface{}) CodedError
+	WithExtraMap(data map[string]interface{}) CodedError
 }
 
 type withCode struct {
@@ -24,6 +25,18 @@ type withCode struct {
 func (n *withCode) WithExtra(key string, value interface{}) CodedError {
 	extra := copyExtra(n.extra)
 	extra[key] = value
+	return &withCode{
+		code:  n.code,
+		extra: extra,
+		error: n.error,
+	}
+}
+
+func (n *withCode) WithExtraMap(data map[string]interface{}) CodedError {
+	extra := copyExtra(n.extra)
+	for k, v := range data {
+		extra[k] = v
+	}
 	return &withCode{
 		code:  n.code,
 		extra: extra,
@@ -103,6 +116,25 @@ func From(err error) CodedError {
 		code:  GetCode(err),
 		error: err,
 	}
+}
+
+func WithExtra(err error, key string, value interface{}) CodedError {
+	return From(err).WithExtra(key, value)
+}
+
+func Wrap(err error, s string, extra ...map[string]interface{}) CodedError {
+	if err == nil {
+		return nil
+	}
+	err = &withStack{
+		error:  errors.WithMessage(err, s),
+		caller: getCaller(),
+	}
+	ce := From(err)
+	for _, e := range extra {
+		ce = ce.WithExtraMap(e)
+	}
+	return ce
 }
 
 var codeMap = map[int]string{}

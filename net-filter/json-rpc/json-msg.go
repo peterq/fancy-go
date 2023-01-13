@@ -20,11 +20,17 @@ type JsonMessageChannel interface {
 	Closed() bool
 }
 
+type ChannelWithBrokenSignal interface {
+	BrokenSignal() <-chan bool
+	WriteCtxWithBrokenSignal(ctx context.Context, msg *Message) (<-chan bool, error)
+}
+
 type lengthPrefixedChannel struct {
 	readMutex  sync.Mutex
 	writeMutex sync.Mutex
 	conn       io.ReadWriteCloser
 	scanner    *bufio.Scanner
+	closed     func() bool
 }
 
 var jsonLengthRe = regexp.MustCompile(`^\s*(\d+),`)
@@ -99,11 +105,16 @@ func (l *lengthPrefixedChannel) Close() error {
 	return l.conn.Close()
 }
 
-func ReadWriteCloserToLengthPrefixedChannel(conn io.ReadWriteCloser) JsonMessageChannel {
+func (l *lengthPrefixedChannel) Closed() bool {
+	return l.closed()
+}
+
+func ReadWriteCloserToLengthPrefixedChannel(conn io.ReadWriteCloser, closed func() bool) JsonMessageChannel {
 	scanner := bufio.NewScanner(conn)
 	scanner.Split(SplitJson)
 	return &lengthPrefixedChannel{
 		conn:    conn,
 		scanner: scanner,
+		closed:  closed,
 	}
 }

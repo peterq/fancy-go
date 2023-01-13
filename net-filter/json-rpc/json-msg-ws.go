@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/peterq/fancy-go/cond-chan"
-	"github.com/peterq/fancy-go/mutex-task"
 	"github.com/peterq/fancy-go/net-filter/websocket-util"
 	"github.com/pkg/errors"
 	"golang.org/x/net/websocket"
@@ -69,7 +68,7 @@ func WebSocketConn2MessageChannel(conn *websocket.Conn) (JsonMessageChannel, Jso
 	type messageRole int
 	const (
 		roleServer messageRole = 1
-		roleClient             = 2
+		roleClient messageRole = 2
 	)
 	var lastMessage Message
 	var lastMessageRole messageRole
@@ -254,8 +253,9 @@ func (h *WsHttpHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 type ServerSession interface {
 	Serve(ctx context.Context) (err error)
 }
+type ctxKey string
 
-const ctxKeyWsConn = "wsConn"
+const ctxKeyWsConn = ctxKey("wsConn")
 
 func WsConnFromCtx(ctx context.Context) *websocket.Conn {
 	return ctx.Value(ctxKeyWsConn).(*websocket.Conn)
@@ -277,50 +277,99 @@ func (h *WsHttpHandler) handleWs(ws *websocket.Conn) {
 }
 
 var _ JsonMessageChannel = (*autoReconnectChannel)(nil)
+var _ ChannelWithBrokenSignal = (*autoReconnectChannel)(nil)
 
 func NewAutoReconnectChannel(
 	createFn func(ctx context.Context) (JsonMessageChannel, error),
 ) JsonMessageChannel {
 	return &autoReconnectChannel{
-		createFn:        createFn,
-		createInnerTask: mutex_task.NewMutexTask(createFn, func(context.Context) string { return "" }),
+		createFn:     createFn,
+		createSignal: cond_chan.NewCond(),
+		brokenSignal: cond_chan.NewCond(),
 	}
 }
 
 type autoReconnectChannel struct {
-	createFn        func(ctx context.Context) (JsonMessageChannel, error)
-	createInnerTask mutex_task.MutexTask[context.Context, JsonMessageChannel]
-	mu              sync.Mutex
-	closed          bool
-	inner           JsonMessageChannel
+	createFn     func(ctx context.Context) (JsonMessageChannel, error)
+	mu           sync.Mutex
+	createSignal cond_chan.Cond
+	creating     bool
+	closed       bool
+	brokenSignal cond_chan.Cond
+	inner        JsonMessageChannel
 }
 
-func (c *autoReconnectChannel) getInner(ctx context.Context) (JsonMessageChannel, error) {
-	c.mu.Lock()
-	closed, inner := c.closed, c.inner
-	if !closed && inner != nil && inner.Closed() {
-		c.inner = nil
-		inner = nil
-	}
-	c.mu.Unlock()
-	if closed {
-		return nil, errors.New("channel closed")
-	}
-	if inner != nil {
-		return inner, nil
-	}
-	inner, err := c.createInnerTask.Exec(ctx)
+func (c *autoReconnectChannel) BrokenSignal() <-chan bool {
+	return c.brokenSignal.Wait()
+}
+
+func (c *autoReconnectChannel) WriteCtxWithBrokenSignal(ctx context.Context, msg *Message) (<-chan bool, error) {
+	brokenSignal, inner, err := c.getInner(ctx)
 	if err != nil {
-		return nil, errors.Wrap(err, "create inner channel error")
+		return nil, err
 	}
+	if hasBrokenSignal, ok := inner.(ChannelWithBrokenSignal); ok {
+		return hasBrokenSignal.WriteCtxWithBrokenSignal(ctx, msg)
+	}
+	return brokenSignal, inner.WriteCtx(ctx, msg)
+}
+
+func (c *autoReconnectChannel) getInner(ctx context.Context) (<-chan bool, JsonMessageChannel, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
-		_ = inner.Close()
-		return nil, errors.New("channel closed")
+	if c.inner != nil && c.inner.Closed() {
+		c.inner = nil
+		c.brokenSignal.Broadcast()
 	}
-	c.inner = inner
-	return inner, nil
+	c.closed = false
+	if c.inner != nil {
+		if hasBrokenSignal, ok := c.inner.(ChannelWithBrokenSignal); ok {
+			return hasBrokenSignal.BrokenSignal(), c.inner, nil
+		}
+		return c.brokenSignal.Wait(), c.inner, nil
+	}
+	for {
+		if c.inner != nil && !c.inner.Closed() {
+			if hasBrokenSignal, ok := c.inner.(ChannelWithBrokenSignal); ok {
+				return hasBrokenSignal.BrokenSignal(), c.inner, nil
+			}
+			return c.brokenSignal.Wait(), c.inner, nil
+		}
+
+		if c.creating {
+			creatingSignal := c.createSignal.Wait()
+			c.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				c.mu.Lock()
+				return nil, nil, ctx.Err()
+			case <-creatingSignal:
+				c.mu.Lock()
+				continue
+			}
+		} else {
+			c.creating = true
+			c.mu.Unlock()
+			var inner JsonMessageChannel
+			var err error
+			func() {
+				defer func() {
+					c.mu.Lock()
+					c.creating = false
+					c.createSignal.Broadcast()
+				}()
+				inner, err = c.createFn(ctx)
+			}()
+			if err != nil {
+				return nil, nil, err
+			}
+			c.inner = inner
+			if hasBrokenSignal, ok := c.inner.(ChannelWithBrokenSignal); ok {
+				return hasBrokenSignal.BrokenSignal(), c.inner, nil
+			}
+			return c.brokenSignal.Wait(), c.inner, nil
+		}
+	}
 }
 
 func (c *autoReconnectChannel) Close() error {
@@ -337,15 +386,26 @@ func (c *autoReconnectChannel) Close() error {
 }
 
 func (c *autoReconnectChannel) ReadCtx(ctx context.Context, msg *Message) error {
-	inner, err := c.getInner(ctx)
-	if err != nil {
-		return err
+	for ctx.Err() == nil {
+		_, inner, err := c.getInner(ctx)
+		if err != nil {
+			log.Println("get inner error:", err)
+			time.Sleep(time.Second)
+			continue
+		}
+		err = inner.ReadCtx(ctx, msg)
+		if err != nil {
+			log.Println("read error:", err)
+			time.Sleep(time.Second)
+			continue
+		}
+		return nil
 	}
-	return inner.ReadCtx(ctx, msg)
+	return ctx.Err()
 }
 
 func (c *autoReconnectChannel) WriteCtx(ctx context.Context, msg *Message) error {
-	inner, err := c.getInner(ctx)
+	_, inner, err := c.getInner(ctx)
 	if err != nil {
 		return err
 	}
@@ -367,7 +427,7 @@ func NewAutoReconnectChannelFromWebsocketAddr(
 		if err != nil {
 			return nil, errors.Wrap(err, "websocket dial error")
 		}
-		cli, server := WebSocketConn2MessageChannel(conn)
+		server, cli := WebSocketConn2MessageChannel(conn)
 		if handleServerChannel != nil {
 			go handleServerChannel(ctx, server)
 		}

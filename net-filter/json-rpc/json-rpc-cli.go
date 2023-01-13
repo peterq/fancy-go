@@ -3,11 +3,13 @@ package json_rpc
 import (
 	"context"
 	"encoding/json"
-	"github.com/peterq/fancy-go/error-code"
-	"github.com/pkg/errors"
 	"log"
 	"sync"
 	"sync/atomic"
+
+	"github.com/1second/pan/common/utils"
+	error_code "github.com/peterq/fancy-go/error-code"
+	"github.com/pkg/errors"
 )
 
 type Cli struct {
@@ -70,12 +72,12 @@ func (c *Cli) init() {
 				delete(c.callMap, msg.ID)
 				c.callMapMux.RUnlock()
 				if !ok {
-					log.Println("result ignored", msg.ID)
+					log.Println("result ignored", msg.ID, utils.Json(msg))
 					continue
 				}
 				if msg.Error != nil {
 					err = error_code.NewError(msg.Error.Code, msg.Error.Message)
-				} else {
+				} else if call.r != nil {
 					err = errors.Wrap(json.Unmarshal(msg.Result, call.r), "unmarshal result error")
 				}
 				call.ch <- err
@@ -129,11 +131,18 @@ func (c *Cli) Call(ctx context.Context, method string, params interface{}, resul
 			c.callMapMux.Unlock()
 		}
 	}()
-	err = c.messageChannel.WriteCtx(ctx, &msg)
+	var brokenSignal <-chan bool
+	if broken, ok := c.messageChannel.(ChannelWithBrokenSignal); ok {
+		brokenSignal, err = broken.WriteCtxWithBrokenSignal(ctx, &msg)
+	} else {
+		err = c.messageChannel.WriteCtx(ctx, &msg)
+	}
 	if err != nil {
 		return errors.Wrap(err, "write message error")
 	}
 	select {
+	case <-brokenSignal:
+		return errors.New("channel broken while waiting for result")
 	case <-c.ctx.Done():
 		return errors.Wrap(c.ctx.Err(), "context done")
 	case <-ctx.Done():

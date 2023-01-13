@@ -148,8 +148,14 @@ func (w *JsonRpcSession[T]) handleMsg(msg Message) {
 			if len(ret.Result) > 1000 {
 				resultToLog = "large result, length: " + strconv.Itoa(len(ret.Result))
 			}
-			_ = w.Log.WithStage("call."+msg.Method).WithData("Params", msg.Params).
-				WithData("Result", resultToLog).ErrorOrInfo(err, "ok")
+			if msg.Method == "keepalive" {
+				w.Log.WithStage("call."+msg.Method).WithData("Params", msg.Params).
+					WithData("Result", resultToLog).Error(err)
+			} else {
+				_ = w.Log.WithStage("call."+msg.Method).WithData("Params", msg.Params).
+					WithData("Result", resultToLog).ErrorOrInfo(err, "ok")
+			}
+
 			w.out <- MessageWithCb{
 				Message: ret,
 			}
