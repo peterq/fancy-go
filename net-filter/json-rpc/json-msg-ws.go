@@ -418,11 +418,21 @@ func (c *autoReconnectChannel) Closed() bool {
 	return c.closed
 }
 
+func FixedAddrFn(addr string) func() (string, error) {
+	return func() (string, error) {
+		return addr, nil
+	}
+}
+
 func NewAutoReconnectChannelFromWebsocketAddr(
-	addr string,
+	addrFn func() (string, error),
 	handleServerChannel func(ctx context.Context, serverChannel JsonMessageChannel),
 ) JsonMessageChannel {
 	return NewAutoReconnectChannel(func(ctx context.Context) (JsonMessageChannel, error) {
+		addr, err := addrFn()
+		if err != nil {
+			return nil, errors.Wrap(err, "get websocket addr error")
+		}
 		conn, err := websocket.Dial(addr, "", addr)
 		if err != nil {
 			return nil, errors.Wrap(err, "websocket dial error")
