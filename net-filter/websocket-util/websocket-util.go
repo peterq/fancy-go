@@ -9,6 +9,11 @@ import (
 
 // ReceiveFullFrame 接受完整帧
 func ReceiveFullFrame(ws *websocket.Conn, ctx context.Context) (byte, []byte, error) {
+	return ReceiveFullFramePingPongCb(ws, ctx, nil)
+}
+
+// ReceiveFullFramePingPongCb 接受完整帧
+func ReceiveFullFramePingPongCb(ws *websocket.Conn, ctx context.Context, pingPongCallback func(byte)) (byte, []byte, error) {
 	var data []byte
 	var pType byte
 	for {
@@ -16,7 +21,7 @@ func ReceiveFullFrame(ws *websocket.Conn, ctx context.Context) (byte, []byte, er
 			return 0, nil, ctx.Err()
 		}
 		var seg []byte
-		payloadType, fin, err := receiveFrame(websocket.Message, ws, &seg, ctx)
+		payloadType, fin, err := receiveFrame(websocket.Message, ws, &seg, ctx, pingPongCallback)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -30,7 +35,7 @@ func ReceiveFullFrame(ws *websocket.Conn, ctx context.Context) (byte, []byte, er
 }
 
 // 接受帧
-func receiveFrame(cd websocket.Codec, ws *websocket.Conn, v interface{}, ctx context.Context) (payloadType byte, fin bool, err error) {
+func receiveFrame(cd websocket.Codec, ws *websocket.Conn, v interface{}, ctx context.Context, pingPongCb func(byte2 byte)) (payloadType byte, fin bool, err error) {
 again:
 	if ctx.Err() != nil {
 		return payloadType, fin, ctx.Err()
@@ -43,6 +48,11 @@ again:
 	}
 	if err != nil {
 		return
+	}
+	if frame.PayloadType() == websocket.PingFrame || frame.PayloadType() == websocket.PongFrame {
+		if pingPongCb != nil {
+			pingPongCb(frame.PayloadType())
+		}
 	}
 	frame, err = ws.HandleFrame(frame)
 	if err != nil {
