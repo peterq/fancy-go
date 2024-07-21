@@ -3,13 +3,12 @@ package json_rpc
 import (
 	"context"
 	"encoding/json"
+	"github.com/peterq/fancy-go/error-code"
+	"github.com/peterq/fancy-go/utils/json-util"
+	"github.com/pkg/errors"
 	"log"
 	"sync"
 	"sync/atomic"
-
-	"github.com/1second/pan/common/utils"
-	error_code "github.com/peterq/fancy-go/error-code"
-	"github.com/pkg/errors"
 )
 
 type Cli struct {
@@ -72,7 +71,7 @@ func (c *Cli) init() {
 				delete(c.callMap, msg.ID)
 				c.callMapMux.RUnlock()
 				if !ok {
-					log.Println("result ignored", msg.ID, utils.Json(msg))
+					log.Println("result ignored", msg.ID, json_util.Json(msg))
 					continue
 				}
 				if msg.Error != nil {
