@@ -57,7 +57,7 @@ var exitOnce sync.Once
 var exitErr error
 
 func ExitWithErr(err error) {
-	println("existing... caused by error: ", err.Error())
+	println("exiting... caused by error: ", err.Error())
 	exitOnce.Do(func() {
 		exitErr = err
 		cancel()
@@ -70,7 +70,7 @@ func GetExitErr() error {
 }
 
 func Exit() {
-	println("existing... caused by manual exit call")
+	println("exiting... caused by manual exit call")
 	exitOnce.Do(func() {
 		cancel()
 		doExit()
